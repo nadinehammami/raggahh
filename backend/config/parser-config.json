@@ -1,0 +1,10 @@
+{
+    "pdf": {
+      "mode": "parse",   
+      "language": "en"
+    },
+    "image": {
+      "captioning": true
+    }
+  }
+  

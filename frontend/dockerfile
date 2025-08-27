@@ -1,0 +1,22 @@
+#for frontend
+# Utilise l’image officielle Node.js
+FROM node:18-alpine
+
+# Définir le répertoire de travail
+WORKDIR /app
+
+# Copier les fichiers package.json et package-lock.json
+COPY package*.json ./
+
+# Installer les dépendances
+RUN npm install
+
+# Copier le reste du code source
+COPY . .
+
+# Build (pour CRA on utilise react-scripts start en dev)
+# Ici on expose le port 3000 et on démarre en mode dev
+EXPOSE 3000
+
+# Définir la commande de démarrage
+CMD ["npm", "start"]

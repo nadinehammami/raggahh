@@ -1,0 +1,39 @@
+services:
+  backend:
+    build: ./backend
+    container_name: openbee_backend
+    ports:
+      - "3001:3001"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend/uploads:/app/uploads
+    networks:
+      - openbee_network
+
+  frontend:
+    build: ./frontend
+    container_name: openbee_frontend
+    ports:
+      - "3000:3000"
+    networks:
+      - openbee_network
+
+  ollama:
+    image: ollama/ollama
+    container_name: ollama_ai
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - openbee_network
+    entrypoint: /bin/sh
+    command: -c "ollama serve & sleep 2 && ollama pull llama3.2:1b && ollama pull llava:7b && tail -f /dev/null"
+
+
+volumes:
+  ollama_data:
+
+networks:
+  openbee_network:

@@ -1,0 +1,44 @@
+{
+  "description": "OpenBee Load Testing Dataset - Uses existing fixture files",
+  "version": "1.0.0",
+  "created": "2024-12-28",
+  "base_path": "../backend/tests/fixtures",
+  "pdfs": [
+    "document2.pdf",
+    "scannedpdf.pdf"
+  ],
+  "images": [
+    "image.png"
+  ],
+  "test_config": {
+    "min_response_chars": 100,
+    "timeouts": {
+      "pdf": "120s",
+      "image": "60s"
+    },
+    "expected_status": 200,
+    "expected_content_type": "text/plain"
+  },
+  "scenarios": {
+    "load_test": {
+      "description": "Normal load testing with gradual ramp-up",
+      "duration": "5m",
+      "max_vus": 20
+    },
+    "stress_test": {
+      "description": "High load stress testing", 
+      "duration": "3m",
+      "max_vus": 50
+    },
+    "endurance_test": {
+      "description": "Long-running endurance test",
+      "duration": "15m", 
+      "vus": 10
+    },
+    "spike_test": {
+      "description": "Sudden load spike testing",
+      "duration": "2m",
+      "spike_vus": 100
+    }
+  }
+}

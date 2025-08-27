@@ -1,0 +1,37 @@
+{
+  "environment": "development",
+  "base_url": "http://localhost:3001",
+  "scenarios": {
+    "load_test": {
+      "duration": "3m",
+      "max_vus": 10,
+      "ramp_duration": "30s"
+    },
+    "stress_test": {
+      "duration": "2m", 
+      "max_vus": 25,
+      "enabled": true
+    },
+    "endurance_test": {
+      "duration": "5m",
+      "vus": 5,
+      "enabled": false
+    },
+    "spike_test": {
+      "duration": "1m",
+      "spike_vus": 50,
+      "enabled": false
+    }
+  },
+  "thresholds": {
+    "http_req_failed": "rate<0.10",
+    "http_req_duration": "p(95)<60000",
+    "pdf_processing_time": "p(95)<90000",
+    "image_processing_time": "p(95)<45000"
+  },
+  "reporting": {
+    "html": true,
+    "json": true,
+    "console": true
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "environment": "production",
+  "base_url": "https://your-production-url.com",
+  "scenarios": {
+    "load_test": {
+      "duration": "10m",
+      "max_vus": 50,
+      "ramp_duration": "2m"
+    },
+    "stress_test": {
+      "duration": "5m",
+      "max_vus": 100,
+      "enabled": true
+    },
+    "endurance_test": {
+      "duration": "30m",
+      "vus": 20,
+      "enabled": true
+    },
+    "spike_test": {
+      "duration": "3m",
+      "spike_vus": 200,
+      "enabled": true
+    }
+  },
+  "thresholds": {
+    "http_req_failed": "rate<0.05",
+    "http_req_duration": "p(95)<45000",
+    "pdf_processing_time": "p(95)<60000", 
+    "image_processing_time": "p(95)<30000"
+  },
+  "reporting": {
+    "html": true,
+    "json": true,
+    "console": true,
+    "webhook": "https://your-monitoring-webhook.com"
+  }
+}

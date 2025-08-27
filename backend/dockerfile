@@ -1,0 +1,22 @@
+#for backend
+FROM node:18
+
+# Install GraphicsMagick and Tesseract OCR (with French language)
+RUN apt-get update && apt-get install -y \
+  graphicsmagick \
+  ghostscript \
+  poppler-utils \
+  tesseract-ocr \
+  tesseract-ocr-fra \
+  tesseract-ocr-eng \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+EXPOSE 3001
+CMD ["npm", "start"]
