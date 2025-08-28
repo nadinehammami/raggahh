@@ -11,6 +11,10 @@ const { fromBuffer } = require('pdf2pic');
 const { execFile } = require('child_process');
 const sharp = require('sharp');
 
+// RAG system imports
+const { testConnection } = require('./database');
+const { processDocumentWithRAG, getRagStatus } = require('./rag-service');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -456,6 +460,92 @@ function isScannedPDF(extractedText, fileSize) {
   return hasLittleText || mostlyNonAlpha;
 }
 
+// RAG system status endpoint
+app.get('/rag/status', async (req, res) => {
+  try {
+    const ragStatus = await getRagStatus();
+    res.json({
+      success: true,
+      rag_status: ragStatus
+    });
+  } catch (error) {
+    console.error('Error getting RAG status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get RAG status',
+      details: error.message
+    });
+  }
+});
+
+// Search similar documents endpoint
+app.post('/rag/search', upload.single('file'), async (req, res) => {
+  try {
+    const { file } = req;
+    if (!file) {
+      return res.status(400).json({ error: "Fichier manquant pour la recherche." });
+    }
+    
+    // Only support PDF and image files for similarity search
+    if (!file.mimetype.includes('pdf') && !file.mimetype.startsWith('image/')) {
+      return res.status(400).json({ error: "Type de fichier non supporté pour la recherche." });
+    }
+    
+    let extractedText = '';
+    
+    // Extract text based on file type
+    if (file.mimetype === 'application/pdf') {
+      const pdfData = await pdfParse(file.buffer);
+      extractedText = normalizeExtractedText(pdfData.text);
+      
+      if (process.env.USE_OCR === 'true' && isScannedPDF(extractedText, file.buffer.length)) {
+        try {
+          extractedText = await extractTextWithOCR(file.buffer);
+        } catch (ocrErr) {
+          console.error("OCR failed during search:", ocrErr.message);
+        }
+      }
+    } else if (file.mimetype.startsWith('image/')) {
+      extractedText = await extractTextFromImageBuffer(file.buffer);
+    }
+    
+    if (!extractedText || extractedText.trim().length < 50) {
+      return res.status(400).json({ 
+        error: "Pas assez de texte extrait pour effectuer une recherche de similarité." 
+      });
+    }
+    
+    // Generate embedding and search
+    const { generateEmbedding } = require('./rag-service');
+    const { findSimilarDocuments } = require('./database');
+    
+    const embedding = await generateEmbedding(extractedText);
+    const threshold = parseFloat(req.body.threshold) || 0.5; // Lower threshold for search
+    const limit = parseInt(req.body.limit) || 10;
+    
+    const similarDocuments = await findSimilarDocuments(embedding, threshold, limit);
+    
+    res.json({
+      success: true,
+      query_info: {
+        filename: file.originalname,
+        text_length: extractedText.length,
+        embedding_dimension: embedding.length
+      },
+      results: similarDocuments,
+      total_results: similarDocuments.length
+    });
+    
+  } catch (error) {
+    console.error('Error in similarity search:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Erreur lors de la recherche de similarité',
+      details: error.message
+    });
+  }
+});
+
 app.post('/analyze', upload.single('file'), async (req, res) => {
   try {
     const { file, body: { action } } = req;
@@ -468,6 +558,7 @@ app.post('/analyze', upload.single('file'), async (req, res) => {
     console.log(`Action: ${action}`);
     
     let aiResponse = '';
+    let ragResult = null; // Declare at function scope to be available everywhere
 
     if (action === 'resumer' && file.mimetype === 'application/pdf') {
       // 1) Try regular PDF text extraction first
@@ -496,13 +587,80 @@ app.post('/analyze', upload.single('file'), async (req, res) => {
         console.log("PDF appears to be text-based, using direct extraction");
       }
 
-      // 3) Résumé structuré avec chunking/merge si nécessaire
-      const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
-      console.log(`Using PDF instruction: ${instruction}`);
+      // 3) RAG Processing - Check for similar documents first
+      console.log('\n=== RAG PROCESSING ===');
+      let generateNewSummary = true;
       
-      aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+      // First attempt to process with RAG (will generate AI summary if needed)
+      if (process.env.RAG_ENABLED === 'true') {
+        try {
+          // Generate AI summary first for new documents
+          const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+          console.log(`Using PDF instruction: ${instruction}`);
+          
+          const newAiSummary = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+          
+          // Process with RAG system
+          ragResult = await processDocumentWithRAG(file, text, newAiSummary);
+          
+          if (ragResult.isFromRAG) {
+            aiResponse = ragResult.aiSummary;
+            generateNewSummary = false;
+            
+            console.log(`\n=== RAG RESULT ===`);
+            console.log(`✅ Used RAG system result`);
+            if (ragResult.exactMatch) {
+              console.log(`📄 Exact document match found`);
+            } else if (ragResult.bestMatch) {
+              console.log(`🎯 Similar document found: ${ragResult.bestMatch.filename}`);
+              console.log(`📊 Similarity score: ${ragResult.bestMatch.similarity_score.toFixed(4)}`);
+            }
+            console.log(`📝 Summary source: RAG database`);
+          } else {
+            aiResponse = newAiSummary;
+            console.log(`📝 No similar documents found, using new AI summary`);
+          }
+        } catch (ragError) {
+          console.error('RAG processing failed, falling back to normal processing:', ragError.message);
+          
+          // Fallback to normal processing
+          const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+          aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+          
+          // Initialize ragResult for failed RAG case
+          ragResult = {
+            isFromRAG: false,
+            aiSummary: aiResponse,
+            similarDocuments: [],
+            exactMatch: false,
+            error: ragError.message
+          };
+        }
+      } else {
+        // Normal processing without RAG
+        const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+        console.log(`Using PDF instruction: ${instruction}`);
+        
+        aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+        
+        // Initialize ragResult for non-RAG case
+        ragResult = {
+          isFromRAG: false,
+          aiSummary: aiResponse,
+          similarDocuments: [],
+          exactMatch: false
+        };
+      }
 
     } else if (action === 'decrire' && file.mimetype.startsWith('image/')) {
+      // Initialize ragResult for image processing (images don't use RAG yet)
+      ragResult = {
+        isFromRAG: false,
+        aiSummary: '',
+        similarDocuments: [],
+        exactMatch: false
+      };
+      
       // Toujours décrire l'image avec le modèle vision (LLaVA)
       console.log('\n=== IMAGE ANALYSIS ===');
       
@@ -520,24 +678,67 @@ app.post('/analyze', upload.single('file'), async (req, res) => {
         structuredPrompt,
         base64
       );
+      
+      // Update ragResult with the actual response
+      ragResult.aiSummary = aiResponse;
 
     } else {
+      // Initialize ragResult for unsupported file types before returning
+      ragResult = {
+        isFromRAG: false,
+        aiSummary: '',
+        similarDocuments: [],
+        exactMatch: false,
+        error: 'Unsupported file type'
+      };
+      
       console.log(`Unsupported file type or action: ${file.mimetype} / ${action}`);
       return res.status(400).json({ error: "Type de fichier non supporté pour cette action." });
     }
 
-    // 4) Enregistrer et renvoyer la réponse
-    console.log(`\n=== SAVING RESPONSE ===`);
+    // 4) Prepare response with RAG metadata
+    console.log(`\n=== PREPARING RESPONSE ===`);
     console.log(`Response length: ${aiResponse.length} characters`);
+    
+    // Create response content with RAG information
+    let responseContent = aiResponse;
+    if (ragResult && process.env.RAG_ENABLED === 'true') {
+      const ragInfo = `
+=== RAG SYSTEM INFO ===
+Source: ${ragResult.isFromRAG ? 'RAG Database' : 'New AI Analysis'}
+${ragResult.exactMatch ? 'Type: Exact document match' : ''}
+${ragResult.bestMatch ? `Type: Similar document (${ragResult.bestMatch.filename})` : ''}
+${ragResult.bestMatch ? `Similarity Score: ${ragResult.bestMatch.similarity_score.toFixed(4)}` : ''}
+${ragResult.exactMatch ? 'Documents Found: 1 (Exact Match)' : 
+  ragResult.similarDocuments ? `Similar Documents Found: ${ragResult.similarDocuments.length}` : 'Similar Documents Found: 0'}
+${ragResult.matchedDocument ? `Reference Document ID: ${ragResult.matchedDocument.id}` : ''}
+${ragResult.matchedDocument ? `Original Filename: ${ragResult.matchedDocument.filename}` : ''}
+Generated: ${new Date().toISOString()}
+=========================
+
+`;
+      responseContent = ragInfo + aiResponse;
+    }
     
     const outDir = path.join(__dirname, 'uploads');
     if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
-    const timestamp = Date.now(); // <- add timestamp
+    const timestamp = Date.now();
     const outPath = path.join(outDir, `${action}_${timestamp}_${file.originalname}.txt`);
-    fs.writeFileSync(outPath, aiResponse, 'utf-8');
-    
+    fs.writeFileSync(outPath, responseContent, 'utf-8');
     
     console.log(`Response saved to: ${outPath}`);
+    
+    // Add RAG headers to response
+    if (ragResult && process.env.RAG_ENABLED === 'true') {
+      res.setHeader('X-RAG-Used', ragResult.isFromRAG ? 'true' : 'false');
+      res.setHeader('X-RAG-Exact-Match', ragResult.exactMatch ? 'true' : 'false');
+      if (ragResult.bestMatch) {
+        res.setHeader('X-RAG-Similarity-Score', ragResult.bestMatch.similarity_score.toFixed(4));
+        res.setHeader('X-RAG-Reference-Document', ragResult.bestMatch.filename);
+      }
+      res.setHeader('X-RAG-Similar-Count', ragResult.similarDocuments ? ragResult.similarDocuments.length : 0);
+    }
+    
     console.log(`=== ANALYSIS COMPLETE ===\n`);
 
     res.download(outPath, err => {
@@ -553,14 +754,55 @@ app.post('/analyze', upload.single('file'), async (req, res) => {
 });
 
 
-if (require.main === module) {
+// Initialize database connection and start server
+async function startServer() {
   const PORT = process.env.PORT || 3001;
+  
+  console.log(`🚀 Starting OpenBee Backend Server...`);
+  console.log(`📊 Backend running on http://localhost:${PORT}`);
+  console.log(`🤖 OLLAMA_HOST: ${OLLAMA_HOST}`);
+  console.log(`📄 MODEL_PDF: ${process.env.MODEL_PDF || 'llama3.2:1b'}`);
+  console.log(`🖼️ MODEL_IMG: ${process.env.MODEL_IMG || 'llava:7b'}`);
+  console.log(`🔍 USE_OCR: ${process.env.USE_OCR || 'false'}`);
+  
+  // Test database connection
+  console.log(`\n=== DATABASE CONNECTION TEST ===`);
+  const dbConnected = await testConnection();
+  
+  if (process.env.RAG_ENABLED === 'true') {
+    console.log(`\n=== RAG SYSTEM STATUS ===`);
+    try {
+      const ragStatus = await getRagStatus();
+      console.log(`RAG Enabled: ${ragStatus.enabled}`);
+      console.log(`Embedding Model: ${ragStatus.embedding_model}`);
+      console.log(`Similarity Threshold: ${ragStatus.similarity_threshold}`);
+      
+      if (ragStatus.database_stats) {
+        console.log(`Documents in Database: ${ragStatus.database_stats.total_documents}`);
+      }
+      
+      if (ragStatus.error) {
+        console.error(`⚠️ RAG System Error: ${ragStatus.error}`);
+      } else {
+        console.log(`✅ RAG System operational`);
+      }
+    } catch (error) {
+      console.error(`⚠️ RAG System Error: ${error.message}`);
+    }
+  } else {
+    console.log(`📝 RAG system is disabled`);
+  }
+  
   app.listen(PORT, () => {
-    console.log(`Backend running on http://localhost:${PORT}`);
-    console.log(`OLLAMA_HOST: ${OLLAMA_HOST}`);
-    console.log(`MODEL_PDF: ${process.env.MODEL_PDF || 'llama3.2:1b'}`);
-    console.log(`MODEL_IMG: ${process.env.MODEL_IMG || 'llava:7b'}`);
-    console.log(`USE_OCR: ${process.env.USE_OCR || 'false'}`);
+    console.log(`\n✅ Server started successfully on port ${PORT}`);
+    console.log(`🌐 Ready to accept requests at http://localhost:${PORT}`);
+  });
+}
+
+if (require.main === module) {
+  startServer().catch(error => {
+    console.error('Failed to start server:', error);
+    process.exit(1);
   });
 }
 
