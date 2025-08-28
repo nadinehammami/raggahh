@@ -72,15 +72,18 @@ async function generateEmbedding(text) {
 // Cosine similarity is now handled in database.js
 
 /**
- * Process document with RAG - main entry point
+ * Process document with RAG - main entry point (OPTIMIZED)
+ * @param {Object} file - Uploaded file object
+ * @param {string} extractedText - Extracted text from document
+ * @param {string|null} aiSummary - AI summary (null if not generated yet for optimization)
  */
-async function processDocumentWithRAG(file, extractedText, aiSummary) {
+async function processDocumentWithRAG(file, extractedText, aiSummary = null) {
   try {
     if (!RAG_ENABLED) {
       console.log('RAG is disabled, proceeding with normal processing');
       return {
         isFromRAG: false,
-        aiSummary,
+        aiSummary: aiSummary,
         similarDocuments: []
       };
     }
@@ -166,31 +169,49 @@ async function processDocumentWithRAG(file, extractedText, aiSummary) {
       };
     }
     
-    // Step 6: No similar document found, store new document
+    // Step 6: No similar document found
     console.log(`📝 No sufficiently similar documents found (best: ${highestSimilarity.toFixed(4)})`);
-    console.log('💾 Storing new document in RAG database');
     
-    const documentId = await insertDocument({
-      filename: file.originalname,
-      file_hash: fileHash,
-      file_size: file.size,
-      mime_type: file.mimetype,
-      extracted_text: extractedText,
-      ai_summary: aiSummary,
-      embedding: embedding,
-      embedding_model: EMBEDDING_MODEL
-    });
-    
-    console.log(`✅ Document stored with ID: ${documentId}`);
-    console.log(`=== RAG PROCESSING COMPLETE ===\n`);
-    
-    return {
-      isFromRAG: false,
-      aiSummary,
-      similarDocuments: similarDocs,
-      exactMatch: false,
-      newDocumentId: documentId
-    };
+    if (aiSummary === null) {
+      // OPTIMIZATION: Don't store yet, signal that AI summary generation is needed
+      console.log('⚡ OPTIMIZED: Need to generate AI summary first');
+      console.log(`=== RAG PROCESSING COMPLETE (Need AI Generation) ===\n`);
+      
+      return {
+        isFromRAG: false,
+        aiSummary: null,
+        similarDocuments: similarDocs,
+        exactMatch: false,
+        fileHash: fileHash,
+        embedding: embedding,
+        needsAiGeneration: true
+      };
+    } else {
+      // AI summary provided, store the new document
+      console.log('💾 Storing new document in RAG database');
+      
+      const documentId = await insertDocument({
+        filename: file.originalname,
+        file_hash: fileHash,
+        file_size: file.size,
+        mime_type: file.mimetype,
+        extracted_text: extractedText,
+        ai_summary: aiSummary,
+        embedding: embedding,
+        embedding_model: EMBEDDING_MODEL
+      });
+      
+      console.log(`✅ Document stored with ID: ${documentId}`);
+      console.log(`=== RAG PROCESSING COMPLETE ===\n`);
+      
+      return {
+        isFromRAG: false,
+        aiSummary,
+        similarDocuments: similarDocs,
+        exactMatch: false,
+        newDocumentId: documentId
+      };
+    }
     
   } catch (error) {
     console.error('RAG processing error:', error.message);

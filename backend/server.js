@@ -12,18 +12,34 @@ const { execFile } = require('child_process');
 const sharp = require('sharp');
 
 // RAG system imports
-const { testConnection } = require('./database');
+const { testConnection, insertDocument } = require('./database');
 const { processDocumentWithRAG, getRagStatus } = require('./rag-service');
 
 const app = express();
+
+// Configure request timeout to prevent aborted requests
+app.use((req, res, next) => {
+  // Set request timeout to 10 minutes for analyze endpoint
+  if (req.path === '/analyze') {
+    req.setTimeout(600000, () => {
+      console.log('⚠️ Request timeout for /analyze endpoint');
+      if (!res.headersSent) {
+        res.status(408).json({ error: 'Request timeout' });
+      }
+    });
+    res.setTimeout(600000);
+  }
+  next();
+});
+
 app.use(cors());
 app.use(express.json());
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Use configurable Ollama host (falls back to docker service name)
 const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://ollama:11434';
-const SUMMARY_CHUNK_CHARS = Number(process.env.SUMMARY_CHUNK_CHARS || 2500);
-const SUMMARY_MAX_CHUNKS = Number(process.env.SUMMARY_MAX_CHUNKS || 6);
+const SUMMARY_CHUNK_CHARS = Number(process.env.SUMMARY_CHUNK_CHARS || 4000);  // Increased for better efficiency
+const SUMMARY_MAX_CHUNKS = Number(process.env.SUMMARY_MAX_CHUNKS || 4);    // Reduced max chunks
 const OCR_MAX_PAGES = Number(process.env.OCR_MAX_PAGES || 8);
 const OCR_LANGS = process.env.OCR_LANGS || 'fra+eng';
 const OCR_PSM = String(process.env.OCR_PSM || '6');
@@ -153,8 +169,17 @@ async function summarizeLongText(model, fullText, instruction) {
   const partials = [];
   for (const [index, chunk] of chunks.entries()) {
     console.log(`\nProcessing chunk ${index + 1}/${chunks.length}`);
-    const summary = await summarizeChunk(model, chunk, instruction);
-    partials.push(summary);
+    try {
+      const chunkStartTime = Date.now();
+      const summary = await summarizeChunk(model, chunk, instruction);
+      const chunkProcessTime = Date.now() - chunkStartTime;
+      console.log(`✅ Chunk ${index + 1} processed in ${chunkProcessTime}ms`);
+      partials.push(summary);
+    } catch (chunkError) {
+      console.error(`❌ Error processing chunk ${index + 1}:`, chunkError.message);
+      // Add a fallback summary for failed chunks
+      partials.push(`[Chunk ${index + 1} - Processing Error: ${chunk.slice(0, 200)}...]`);
+    }
   }
   
   console.log(`\n=== MERGING PARTIAL SUMMARIES ===`);
@@ -203,7 +228,10 @@ async function generateText(model, prompt) {
     const res = await axios.post(
       `${OLLAMA_HOST}/api/generate`,
       { model, prompt, stream: false, options: { temperature: 0.2 } },
-      { headers: { 'Content-Type': 'application/json' } }
+      { 
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 300000  // 5 minutes timeout for text generation
+      }
     );
     
     console.log(`Ollama response status: ${res.status}`);
@@ -591,34 +619,57 @@ app.post('/analyze', upload.single('file'), async (req, res) => {
       console.log('\n=== RAG PROCESSING ===');
       let generateNewSummary = true;
       
-      // First attempt to process with RAG (will generate AI summary if needed)
+      // First attempt to process with RAG (OPTIMIZED: Check similarity first, generate AI only if needed)
       if (process.env.RAG_ENABLED === 'true') {
         try {
-          // Generate AI summary first for new documents
-          const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
-          console.log(`Using PDF instruction: ${instruction}`);
+          console.log('🚀 OPTIMIZED RAG: Checking for existing documents first...');
           
-          const newAiSummary = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
-          
-          // Process with RAG system
-          ragResult = await processDocumentWithRAG(file, text, newAiSummary);
+          // Process with RAG system WITHOUT generating AI summary yet (pass null for now)
+          ragResult = await processDocumentWithRAG(file, text, null);
           
           if (ragResult.isFromRAG) {
+            // ✅ FAST PATH: Found exact or similar match, use cached result
             aiResponse = ragResult.aiSummary;
             generateNewSummary = false;
             
-            console.log(`\n=== RAG RESULT ===`);
-            console.log(`✅ Used RAG system result`);
+            console.log(`\n=== ⚡ FAST RAG RESULT ===`);
+            console.log(`✅ Used cached result (NO LLM needed!)`);
             if (ragResult.exactMatch) {
               console.log(`📄 Exact document match found`);
             } else if (ragResult.bestMatch) {
               console.log(`🎯 Similar document found: ${ragResult.bestMatch.filename}`);
               console.log(`📊 Similarity score: ${ragResult.bestMatch.similarity_score.toFixed(4)}`);
             }
-            console.log(`📝 Summary source: RAG database`);
+            console.log(`📝 Summary source: RAG database (INSTANT)`);
           } else {
-            aiResponse = newAiSummary;
-            console.log(`📝 No similar documents found, using new AI summary`);
+            // 🐌 SLOW PATH: No similar documents, need to generate new AI summary
+            console.log(`\n=== 🐌 GENERATING NEW AI SUMMARY (No similar docs found) ===`);
+            const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+            console.log(`Using PDF instruction: ${instruction}`);
+            
+            aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+            
+            // Store the new document with its generated summary
+            ragResult.aiSummary = aiResponse;
+            console.log(`📝 Generated new AI summary, storing in RAG database...`);
+            
+            // Store the document now that we have the AI summary
+            try {
+              const documentId = await insertDocument({
+                filename: file.originalname,
+                file_hash: ragResult.fileHash,
+                file_size: file.size,
+                mime_type: file.mimetype,
+                extracted_text: text,
+                ai_summary: aiResponse,
+                embedding: ragResult.embedding,
+                embedding_model: process.env.EMBEDDING_MODEL || 'nomic-embed-text'
+              });
+              console.log(`✅ New document stored in RAG database with ID: ${documentId}`);
+            } catch (storeError) {
+              console.error('⚠️ Failed to store document in RAG database:', storeError.message);
+              // Continue anyway - the response generation was successful
+            }
           }
         } catch (ragError) {
           console.error('RAG processing failed, falling back to normal processing:', ragError.message);
@@ -638,10 +689,10 @@ app.post('/analyze', upload.single('file'), async (req, res) => {
         }
       } else {
         // Normal processing without RAG
-        const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
-        console.log(`Using PDF instruction: ${instruction}`);
-        
-        aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+      const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+      console.log(`Using PDF instruction: ${instruction}`);
+      
+      aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
         
         // Initialize ragResult for non-RAG case
         ragResult = {
@@ -720,14 +771,6 @@ Generated: ${new Date().toISOString()}
       responseContent = ragInfo + aiResponse;
     }
     
-    const outDir = path.join(__dirname, 'uploads');
-    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
-    const timestamp = Date.now();
-    const outPath = path.join(outDir, `${action}_${timestamp}_${file.originalname}.txt`);
-    fs.writeFileSync(outPath, responseContent, 'utf-8');
-    
-    console.log(`Response saved to: ${outPath}`);
-    
     // Add RAG headers to response
     if (ragResult && process.env.RAG_ENABLED === 'true') {
       res.setHeader('X-RAG-Used', ragResult.isFromRAG ? 'true' : 'false');
@@ -738,7 +781,29 @@ Generated: ${new Date().toISOString()}
       }
       res.setHeader('X-RAG-Similar-Count', ragResult.similarDocuments ? ragResult.similarDocuments.length : 0);
     }
+
+    // 🚀 OPTIMIZATION: For exact matches, send response directly (skip file I/O)
+    if (ragResult && ragResult.exactMatch && process.env.RAG_ENABLED === 'true') {
+      console.log(`⚡ FAST EXACT MATCH: Sending cached result directly (no file creation)`);
+      console.log(`=== ANALYSIS COMPLETE (INSTANT) ===\n`);
+      
+      // Set headers for direct text response
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${action}_${Date.now()}_${file.originalname}.txt"`);
+      
+      // Send response directly
+      return res.send(responseContent);
+    }
+
+    // 🐌 STANDARD PATH: Create file for new content or similar matches
+    console.log(`📝 Creating temporary file for response...`);
+    const outDir = path.join(__dirname, 'uploads');
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
+    const timestamp = Date.now();
+    const outPath = path.join(outDir, `${action}_${timestamp}_${file.originalname}.txt`);
+    fs.writeFileSync(outPath, responseContent, 'utf-8');
     
+    console.log(`Response saved to: ${outPath}`);
     console.log(`=== ANALYSIS COMPLETE ===\n`);
 
     res.download(outPath, err => {
@@ -754,9 +819,488 @@ Generated: ${new Date().toISOString()}
 });
 
 
+// Duplicate startServer function removed - using the one at the end of the file
+
+// At the end of server.js
+module.exports = app; // This makes it available for require()
+
+
+
+
+// OCR for a single image buffer (PNG/JPG)
+
+async function extractTextFromImageBuffer(imageBuffer) {
+
+  try {
+
+    const ocrConfig = {
+
+      lang: OCR_LANGS,
+
+      oem: 1,
+
+      psm: Number(OCR_PSM),
+
+    };
+
+    const preprocessed = await sharp(imageBuffer)
+
+      .grayscale()
+
+      .threshold(180)
+
+      .toBuffer();
+
+    const text = await tesseract.recognize(preprocessed, ocrConfig);
+
+    
+
+    console.log(`Image OCR extracted: ${text.length} characters`);
+
+    console.log(`Image OCR preview: ${text.slice(0, 200)}`);
+
+    
+
+    return normalizeExtractedText(text);
+
+  } catch (err) {
+
+    console.error('OCR Image Error:', err.message);
+
+    return '';
+
+  }
+
+}
+
+
+
+/**
+
+ * Check if PDF appears to be scanned (low text content ratio)
+
+ */
+
+function isScannedPDF(extractedText, fileSize) {
+
+  const textLength = extractedText.trim().length;
+
+  const textToSizeRatio = textLength / fileSize;
+
+  
+
+  // If ratio is very low or text is mostly whitespace/symbols, likely scanned
+
+  const hasLittleText = textLength < 100 || textToSizeRatio < 0.001;
+
+  const mostlyNonAlpha = (extractedText.match(/[a-zA-Z]/g) || []).length < textLength * 0.5;
+
+  
+
+  console.log(`PDF Analysis: textLength=${textLength}, fileSize=${fileSize}, ratio=${textToSizeRatio.toFixed(6)}`);
+
+  console.log(`Has little text: ${hasLittleText}, Mostly non-alpha: ${mostlyNonAlpha}`);
+
+  
+
+  return hasLittleText || mostlyNonAlpha;
+
+}
+
+
+// RAG system status endpoint
+app.get('/rag/status', async (req, res) => {
+  try {
+    const ragStatus = await getRagStatus();
+    res.json({
+      success: true,
+      rag_status: ragStatus
+    });
+  } catch (error) {
+    console.error('Error getting RAG status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get RAG status',
+      details: error.message
+    });
+  }
+});
+
+// Search similar documents endpoint
+app.post('/rag/search', upload.single('file'), async (req, res) => {
+  try {
+    const { file } = req;
+    if (!file) {
+      return res.status(400).json({ error: "Fichier manquant pour la recherche." });
+    }
+    
+    // Only support PDF and image files for similarity search
+    if (!file.mimetype.includes('pdf') && !file.mimetype.startsWith('image/')) {
+      return res.status(400).json({ error: "Type de fichier non supporté pour la recherche." });
+    }
+    
+    let extractedText = '';
+    
+    // Extract text based on file type
+    if (file.mimetype === 'application/pdf') {
+      const pdfData = await pdfParse(file.buffer);
+      extractedText = normalizeExtractedText(pdfData.text);
+      
+      if (process.env.USE_OCR === 'true' && isScannedPDF(extractedText, file.buffer.length)) {
+        try {
+          extractedText = await extractTextWithOCR(file.buffer);
+        } catch (ocrErr) {
+          console.error("OCR failed during search:", ocrErr.message);
+        }
+      }
+    } else if (file.mimetype.startsWith('image/')) {
+      extractedText = await extractTextFromImageBuffer(file.buffer);
+    }
+    
+    if (!extractedText || extractedText.trim().length < 50) {
+      return res.status(400).json({ 
+        error: "Pas assez de texte extrait pour effectuer une recherche de similarité." 
+      });
+    }
+    
+    // Generate embedding and search
+    const { generateEmbedding } = require('./rag-service');
+    const { findSimilarDocuments } = require('./database');
+    
+    const embedding = await generateEmbedding(extractedText);
+    const threshold = parseFloat(req.body.threshold) || 0.5; // Lower threshold for search
+    const limit = parseInt(req.body.limit) || 10;
+    
+    const similarDocuments = await findSimilarDocuments(embedding, threshold, limit);
+    
+    res.json({
+      success: true,
+      query_info: {
+        filename: file.originalname,
+        text_length: extractedText.length,
+        embedding_dimension: embedding.length
+      },
+      results: similarDocuments,
+      total_results: similarDocuments.length
+    });
+    
+  } catch (error) {
+    console.error('Error in similarity search:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Erreur lors de la recherche de similarité',
+      details: error.message
+    });
+  }
+});
+
+
+app.post('/analyze', upload.single('file'), async (req, res) => {
+
+  try {
+
+    const { file, body: { action } } = req;
+
+    if (!file || !action) {
+
+      return res.status(400).json({ error: "Fichier ou action manquant." });
+
+    }
+
+    
+
+    console.log(`\n=== NEW ANALYSIS REQUEST ===`);
+
+    console.log(`File: ${file.originalname}, Size: ${file.size} bytes, Type: ${file.mimetype}`);
+
+    console.log(`Action: ${action}`);
+
+    
+
+    let aiResponse = '';
+
+    let ragResult = null; // Declare at function scope to be available everywhere
+
+
+    if (action === 'resumer' && file.mimetype === 'application/pdf') {
+
+      // 1) Try regular PDF text extraction first
+
+      console.log('\n=== PDF TEXT EXTRACTION ===');
+
+      const pdfData = await pdfParse(file.buffer);
+
+      let text = normalizeExtractedText(pdfData.text);
+
+      
+
+      console.log(`Extracted text length: ${text.length} characters`);
+
+      console.log(`Extracted text preview: ${text.slice(0, 500)}`);
+
+      console.log(`Text extraction complete`);
+
+
+
+      // 2) Check if PDF appears to be scanned and use OCR if needed
+
+      const useOCR = process.env.USE_OCR === 'true';
+
+      console.log(`USE_OCR setting: ${useOCR}`);
+
+      
+
+      if (useOCR && isScannedPDF(text, file.buffer.length)) {
+
+        console.log("PDF appears to be scanned, switching to OCR...");
+
+        try {
+
+          text = await extractTextWithOCR(file.buffer);
+
+          console.log("OCR extraction completed");
+
+        } catch (ocrErr) {
+
+          console.error("OCR failed, using original text:", ocrErr.message);
+
+          // Keep original text if OCR fails
+
+        }
+
+      } else {
+
+        console.log("PDF appears to be text-based, using direct extraction");
+
+      }
+
+
+
+      // 3) RAG Processing - Check for similar documents first
+      console.log('\n=== RAG PROCESSING ===');
+      let generateNewSummary = true;
+      
+      // First attempt to process with RAG (will generate AI summary if needed)
+      if (process.env.RAG_ENABLED === 'true') {
+        try {
+          // Generate AI summary first for new documents
+          const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+          console.log(`Using PDF instruction: ${instruction}`);
+          
+          const newAiSummary = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+          
+          // Process with RAG system
+          ragResult = await processDocumentWithRAG(file, text, newAiSummary);
+          
+          if (ragResult.isFromRAG) {
+            aiResponse = ragResult.aiSummary;
+            generateNewSummary = false;
+            
+            console.log(`\n=== RAG RESULT ===`);
+            console.log(`✅ Used RAG system result`);
+            if (ragResult.exactMatch) {
+              console.log(`📄 Exact document match found`);
+            } else if (ragResult.bestMatch) {
+              console.log(`🎯 Similar document found: ${ragResult.bestMatch.filename}`);
+              console.log(`📊 Similarity score: ${ragResult.bestMatch.similarity_score.toFixed(4)}`);
+            }
+            console.log(`📝 Summary source: RAG database`);
+          } else {
+            aiResponse = newAiSummary;
+            console.log(`📝 No similar documents found, using new AI summary`);
+          }
+        } catch (ragError) {
+          console.error('RAG processing failed, falling back to normal processing:', ragError.message);
+          
+          // Fallback to normal processing
+          const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+          aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+          
+          // Initialize ragResult for failed RAG case
+          ragResult = {
+            isFromRAG: false,
+            aiSummary: aiResponse,
+            similarDocuments: [],
+            exactMatch: false,
+            error: ragError.message
+          };
+        }
+      } else {
+        // Normal processing without RAG
+      const instruction = process.env.PROMPT_PDF || process.env.PDF_PROMPT_PREFIX || '';
+
+      console.log(`Using PDF instruction: ${instruction}`);
+
+      
+
+      aiResponse = await summarizeLongText(process.env.MODEL_PDF || 'llama3.2:1b', text, instruction);
+
+        
+        // Initialize ragResult for non-RAG case
+        ragResult = {
+          isFromRAG: false,
+          aiSummary: aiResponse,
+          similarDocuments: [],
+          exactMatch: false
+        };
+      }
+
+
+    } else if (action === 'decrire' && file.mimetype.startsWith('image/')) {
+
+      // Initialize ragResult for image processing (images don't use RAG yet)
+      ragResult = {
+        isFromRAG: false,
+        aiSummary: '',
+        similarDocuments: [],
+        exactMatch: false
+      };
+      
+      // Toujours décrire l'image avec le modèle vision (LLaVA)
+
+      console.log('\n=== IMAGE ANALYSIS ===');
+
+      
+
+      const base64 = await preprocessImageForVision(file.buffer);
+
+      console.log(`Image preprocessed, base64 length: ${base64.length}`);
+
+      
+
+      const structuredPrompt = buildImageSummaryPrompt({ language: 'fr', basePrompt: process.env.PROMPT_IMG || process.env.IMAGE_PROMPT_PREFIX || '' });
+
+      
+
+      console.log(`\n=== IMAGE PROMPT SENT TO OLLAMA ===`);
+
+      console.log(structuredPrompt);
+
+      console.log(`=== END IMAGE PROMPT ===\n`);
+
+      
+
+      aiResponse = await describeImage(
+
+        process.env.MODEL_IMG || 'llava:7b',
+
+        structuredPrompt,
+
+        base64
+
+      );
+
+      
+      // Update ragResult with the actual response
+      ragResult.aiSummary = aiResponse;
+
+
+    } else {
+
+      // Initialize ragResult for unsupported file types before returning
+      ragResult = {
+        isFromRAG: false,
+        aiSummary: '',
+        similarDocuments: [],
+        exactMatch: false,
+        error: 'Unsupported file type'
+      };
+      
+      console.log(`Unsupported file type or action: ${file.mimetype} / ${action}`);
+
+      return res.status(400).json({ error: "Type de fichier non supporté pour cette action." });
+
+    }
+
+
+
+    // 4) Prepare response with RAG metadata
+    console.log(`\n=== PREPARING RESPONSE ===`);
+    console.log(`Response length: ${aiResponse.length} characters`);
+
+    // Create response content with RAG information
+    let responseContent = aiResponse;
+    if (ragResult && process.env.RAG_ENABLED === 'true') {
+      const ragInfo = `
+=== RAG SYSTEM INFO ===
+Source: ${ragResult.isFromRAG ? 'RAG Database' : 'New AI Analysis'}
+${ragResult.exactMatch ? 'Type: Exact document match' : ''}
+${ragResult.bestMatch ? `Type: Similar document (${ragResult.bestMatch.filename})` : ''}
+${ragResult.bestMatch ? `Similarity Score: ${ragResult.bestMatch.similarity_score.toFixed(4)}` : ''}
+${ragResult.exactMatch ? 'Documents Found: 1 (Exact Match)' : 
+  ragResult.similarDocuments ? `Similar Documents Found: ${ragResult.similarDocuments.length}` : 'Similar Documents Found: 0'}
+${ragResult.matchedDocument ? `Reference Document ID: ${ragResult.matchedDocument.id}` : ''}
+${ragResult.matchedDocument ? `Original Filename: ${ragResult.matchedDocument.filename}` : ''}
+Generated: ${new Date().toISOString()}
+=========================
+
+`;
+      responseContent = ragInfo + aiResponse;
+    }
+    
+    // Add RAG headers to response
+    if (ragResult && process.env.RAG_ENABLED === 'true') {
+      res.setHeader('X-RAG-Used', ragResult.isFromRAG ? 'true' : 'false');
+      res.setHeader('X-RAG-Exact-Match', ragResult.exactMatch ? 'true' : 'false');
+      if (ragResult.bestMatch) {
+        res.setHeader('X-RAG-Similarity-Score', ragResult.bestMatch.similarity_score.toFixed(4));
+        res.setHeader('X-RAG-Reference-Document', ragResult.bestMatch.filename);
+      }
+      res.setHeader('X-RAG-Similar-Count', ragResult.similarDocuments ? ragResult.similarDocuments.length : 0);
+    }
+
+    // 🚀 OPTIMIZATION: For exact matches, send response directly (skip file I/O)
+    if (ragResult && ragResult.exactMatch && process.env.RAG_ENABLED === 'true') {
+      console.log(`⚡ FAST EXACT MATCH: Sending cached result directly (no file creation)`);
+      console.log(`=== ANALYSIS COMPLETE (INSTANT) ===\n`);
+      
+      // Set headers for direct text response
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${action}_${Date.now()}_${file.originalname}.txt"`);
+      
+      // Send response directly
+      return res.send(responseContent);
+    }
+
+    // 🐌 STANDARD PATH: Create file for new content or similar matches
+    console.log(`📝 Creating temporary file for response...`);
+    const outDir = path.join(__dirname, 'uploads');
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
+
+    const timestamp = Date.now();
+    const outPath = path.join(outDir, `${action}_${timestamp}_${file.originalname}.txt`);
+    fs.writeFileSync(outPath, responseContent, 'utf-8');
+    
+    console.log(`Response saved to: ${outPath}`);
+    console.log(`=== ANALYSIS COMPLETE ===\n`);
+
+    res.download(outPath, err => {
+      fs.unlinkSync(outPath);
+      if (err) console.error('Erreur envoi fichier:', err);
+    });
+
+
+
+  } catch (err) {
+
+    console.error('Erreur /analyze:', err);
+
+    console.error('Error stack:', err.stack);
+
+    res.status(500).json({ error: 'Erreur interne du serveur.' });
+
+  }
+
+});
+
+
+
+
+
 // Initialize database connection and start server
 async function startServer() {
   const PORT = process.env.PORT || 3001;
+
   
   console.log(`🚀 Starting OpenBee Backend Server...`);
   console.log(`📊 Backend running on http://localhost:${PORT}`);
@@ -794,6 +1338,7 @@ async function startServer() {
   }
   
   app.listen(PORT, () => {
+
     console.log(`\n✅ Server started successfully on port ${PORT}`);
     console.log(`🌐 Ready to accept requests at http://localhost:${PORT}`);
   });
@@ -804,7 +1349,11 @@ if (require.main === module) {
     console.error('Failed to start server:', error);
     process.exit(1);
   });
+
 }
 
+
+
 // At the end of server.js
+
 module.exports = app; // This makes it available for require()

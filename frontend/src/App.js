@@ -29,7 +29,7 @@ function App() {
         }
       );
 
-      // Créer URL pour le blob reçu
+      // Success case - create blob URL for download
       const blob = new Blob([response.data], { type: "text/plain" });
       const url = URL.createObjectURL(blob);
       const name = `${action}_${file.name}.txt`;
@@ -38,7 +38,28 @@ function App() {
       setDownloadName(name);
     } catch (error) {
       console.error("Erreur lors de l'envoi au backend :", error);
-      alert("Une erreur est survenue. Vérifie ton backend !");
+      
+      // Handle error responses (when server returns 4xx/5xx with JSON error)
+      let errorMessage = "Une erreur est survenue. Vérifie ton backend !";
+      
+      if (error.response) {
+        if (error.response.status === 404) {
+          errorMessage = "Endpoint non trouvé. Vérifie que le backend est démarré.";
+        } else if (error.response.data) {
+          // Error response data is a blob due to responseType: "blob"
+          try {
+            const text = await error.response.data.text();
+            const errorData = JSON.parse(text);
+            errorMessage = errorData.error || `Erreur ${error.response.status}`;
+          } catch (parseError) {
+            errorMessage = `Erreur ${error.response.status} du serveur`;
+          }
+        }
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
+      alert(errorMessage);
     }
   };
 

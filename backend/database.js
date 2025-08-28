@@ -110,7 +110,8 @@ async function findSimilarDocuments(embedding, threshold = 0.85, limit = 5) {
     
     for (const doc of allDocs) {
       try {
-        const docEmbedding = JSON.parse(doc.embedding);
+        // MySQL JSON column already returns JavaScript object/array, no need to JSON.parse
+        const docEmbedding = doc.embedding;
         const similarity = calculateCosineSimilarity(embedding, docEmbedding);
         calculationsCount++;
         
