@@ -1,0 +1,22 @@
+     █ PDF Analysis Test
+
+       █ 📄 PDF Analysis Test
+
+     data_received.................: 0 B   0 B/s
+     data_sent.....................: 0 B   0 B/s
+   ✓ error_rate....................: 0.00% ✓ 0          ✗ 0  
+     group_duration................: min=0.00ms avg=0.79ms med=0.54ms p(90)=1.01ms p(95)=1.18ms p(99)=3.01ms max=201.98ms
+     http_req_duration.............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms max=0.00ms  
+     ✓ { phase:load }..............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms max=0.00ms  
+     ✓ { phase:spike }.............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms max=0.00ms  
+     ✓ { phase:stress }............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms max=0.00ms  
+   ✓ http_req_failed...............: 0.00% ✓ 0          ✗ 0  
+   ✓ image_processing_time.........: min=0      avg=0      med=0      p(90)=0      p(95)=0      p(99)=0      max=0       
+   ✓ image_success_rate............: 0.00% ✓ 0          ✗ 0  
+     iteration_duration............: min=0.00ms avg=0.89ms med=0.55ms p(90)=1.05ms p(95)=1.34ms p(99)=3.94ms max=202.98ms
+     iterations....................: 2122  486.418684/s
+   ✓ pdf_processing_time...........: min=0      avg=0      med=0      p(90)=0      p(95)=0      p(99)=0      max=0       
+   ✓ pdf_success_rate..............: 0.00% ✓ 0          ✗ 0  
+   ✓ response_validation_success...: 0.00% ✓ 0          ✗ 0  
+     vus...........................: 1     min=1        max=1
+     vus_max.......................: 1     min=1        max=1

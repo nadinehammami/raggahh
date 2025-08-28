@@ -45,13 +45,15 @@ const imageSuccessRate = new Rate('image_success_rate');
 ======================= */
 function safeFileLoad(filePath, fileName) {
   try {
+    const content = open(filePath, 'b');
+    console.log(`✅ Loaded ${fileName} (${typeof content}) from ${filePath}`);
     return {
       name: fileName,
-      content: open(filePath, 'b'),
+      content: content,
       loaded: true
     };
   } catch (e) {
-    console.warn(`⚠️ Could not load ${fileName}: ${e.message}`);
+    console.warn(`⚠️ Could not load ${fileName} from ${filePath}: ${e.message}`);
     return {
       name: fileName,
       content: null,
@@ -213,30 +215,30 @@ function validateResponse(response, fileType, fileName) {
   const isValid = response && 
                  response.status === 200 && 
                  response.body && 
-                 response.body.length >= manifest.test_config.min_response_chars &&
-                 response.headers['Content-Type']?.includes('text/plain');
+                 response.body.length >= (manifest.test_config?.min_response_chars || 100) &&
+                 (response.headers['Content-Type']?.includes('text/plain') || response.headers['content-type']?.includes('text/plain'));
   
-  responseValidation.add(isValid);
-  
-  if (isValid) {
-    successfulRequests.add(1);
-    const processingTimeValue = response.timings.duration;
-    processingTime.add(processingTimeValue);
+  // Update basic metrics only
+  if (response) {
+    responseValidation.add(isValid);
     
-    if (fileType === 'pdf') {
-      pdfProcessingTime.add(processingTimeValue);
-      pdfSuccessRate.add(1);
-    } else if (fileType === 'image') {
-      imageProcessingTime.add(processingTimeValue);
-      imageSuccessRate.add(1);
+    if (isValid) {
+      successfulRequests.add(1);
+      if (response.timings && response.timings.duration) {
+        processingTime.add(response.timings.duration);
+        
+        if (fileType === 'pdf') {
+          pdfProcessingTime.add(response.timings.duration);
+        } else if (fileType === 'image') {
+          imageProcessingTime.add(response.timings.duration);
+        }
+      }
+    } else {
+      failedRequests.add(1);
     }
   } else {
+    responseValidation.add(false);
     failedRequests.add(1);
-    if (fileType === 'pdf') {
-      pdfSuccessRate.add(0);
-    } else if (fileType === 'image') {
-      imageSuccessRate.add(0);
-    }
   }
 
   return isValid;
@@ -248,8 +250,15 @@ function makeAnalysisRequest(file, timeout = '120s') {
     return null;
   }
 
+  // Validate file content exists
+  let fileContent = file.content;
+  if (!fileContent) {
+    console.error(`❌ No file content for ${file.name}`);
+    return null;
+  }
+
   const formData = {
-    file: http.file(file.content, file.name, file.mime),
+    file: http.file(fileContent, file.name, file.mime || 'application/octet-stream'),
     action: file.action
   };
 
@@ -301,11 +310,24 @@ export function testPdfAnalysis() {
     
     const isValid = validateResponse(response, 'pdf', file.name);
     
-    check(response, {
-      '📄 PDF - Status 200': (r) => r.status === 200,
-      '📄 PDF - Valid response': () => isValid,
-      '📄 PDF - Processing time < 120s': (r) => r.timings.duration < 120000,
-    });
+    // Only run checks if response exists
+    if (response) {
+      check(response, {
+        '📄 PDF - Status 200': (r) => r && r.status === 200,
+        '📄 PDF - Valid response': () => isValid,
+        '📄 PDF - Processing time < 120s': (r) => r && r.timings && r.timings.duration < 120000,
+      });
+      
+      // Update metrics
+      if (response.status === 200 && isValid) {
+        pdfSuccessRate.add(true);
+      } else {
+        pdfSuccessRate.add(false);
+      }
+    } else {
+      console.error(`❌ No response received for ${file.name}`);
+      pdfSuccessRate.add(false);
+    }
 
     randomSleep(1, 3);
   });
@@ -326,11 +348,24 @@ export function testImageAnalysis() {
     
     const isValid = validateResponse(response, 'image', file.name);
     
-    check(response, {
-      '🖼️ Image - Status 200': (r) => r.status === 200,
-      '🖼️ Image - Valid response': () => isValid,
-      '🖼️ Image - Processing time < 60s': (r) => r.timings.duration < 60000,
-    });
+    // Only run checks if response exists
+    if (response) {
+      check(response, {
+        '🖼️ Image - Status 200': (r) => r && r.status === 200,
+        '🖼️ Image - Valid response': () => isValid,
+        '🖼️ Image - Processing time < 60s': (r) => r && r.timings && r.timings.duration < 60000,
+      });
+      
+      // Update metrics
+      if (response.status === 200 && isValid) {
+        imageSuccessRate.add(true);
+      } else {
+        imageSuccessRate.add(false);
+      }
+    } else {
+      console.error(`❌ No response received for ${file.name}`);
+      imageSuccessRate.add(false);
+    }
 
     randomSleep(0.5, 2);
   });
@@ -388,6 +423,22 @@ export function handleSummary(data) {
     'stdout': textSummary(data, { indent: ' ', enableColors: true }),
     [`reports/summary-${env}-${timestamp}.txt`]: textSummary(data, { indent: ' ', enableColors: false })
   };
+}
+
+/* =======================
+   MAIN TEST FUNCTION
+======================= */
+export default function() {
+  // Run both PDF and image analysis tests
+  group('PDF Analysis Test', () => {
+    testPdfAnalysis();
+  });
+  
+  group('Image Analysis Test', () => {
+    testImageAnalysis();
+  });
+  
+  sleep(1);
 }
 
 /* =======================

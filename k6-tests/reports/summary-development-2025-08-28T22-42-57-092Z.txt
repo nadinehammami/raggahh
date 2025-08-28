@@ -1,0 +1,27 @@
+     █ PDF Analysis Test
+
+       █ 📄 PDF Analysis Test
+
+         ✗ 📄 PDF - Status 200
+          ↳  0% — ✓ 0 / ✗ 1005
+
+     checks........................: 0.00% ✓ 0          ✗ 1005
+     data_received.................: 0 B   0 B/s
+     data_sent.....................: 0 B   0 B/s
+   ✓ error_rate....................: 0.00% ✓ 0          ✗ 0   
+     failed_requests...............: 1005  192.017605/s
+     group_duration................: min=0.00ms avg=6.06ms med=1.65ms p(90)=3.01ms p(95)=4.08ms p(99)=137.16ms max=1616.18ms
+     http_req_duration.............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms   max=0.00ms   
+     ✓ { phase:load }..............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms   max=0.00ms   
+     ✓ { phase:spike }.............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms   max=0.00ms   
+     ✓ { phase:stress }............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms   max=0.00ms   
+   ✓ http_req_failed...............: 0.00% ✓ 0          ✗ 0   
+   ✓ image_processing_time.........: min=0      avg=0      med=0      p(90)=0      p(95)=0      p(99)=0        max=0        
+   ✓ image_success_rate............: 0.00% ✓ 0          ✗ 0   
+     iteration_duration............: min=0.00ms avg=6.15ms med=1.69ms p(90)=3.03ms p(95)=4.60ms p(99)=137.16ms max=1616.18ms
+     iterations....................: 1005  192.017605/s
+   ✓ pdf_processing_time...........: min=0      avg=0      med=0      p(90)=0      p(95)=0      p(99)=0        max=0        
+   ✗ pdf_success_rate..............: 0.00% ✓ 0          ✗ 1005
+   ✓ response_validation_success...: 0.00% ✓ 0          ✗ 0   
+     vus...........................: 2     min=2        max=2 
+     vus_max.......................: 2     min=2        max=2 

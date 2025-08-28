@@ -1,0 +1,34 @@
+     █ 🔥 Warmup Phase
+
+       ✓ Service is responding
+
+     █ 🖼️ Image Analysis Test
+
+     █ 📄 PDF Analysis Test
+
+     checks........................: 100.00% ✓ 32         ✗ 0    
+     data_received.................: 14 kB   304 B/s
+     data_sent.....................: 2.2 kB  48 B/s
+   ✓ error_rate....................: 0.00%   ✓ 0          ✗ 0    
+     group_duration................: min=0.00ms avg=9.83ms med=0.54ms p(90)=1.09ms p(95)=1.52ms p(99)=84.57ms max=2955.54ms
+     http_req_blocked..............: min=0.00ms avg=0.10ms med=0.00ms p(90)=0.00ms p(95)=0.71ms p(99)=1.58ms  max=1.58ms   
+     http_req_connecting...........: min=0.00ms avg=0.04ms med=0.00ms p(90)=0.00ms p(95)=0.26ms p(99)=0.58ms  max=0.58ms   
+     http_req_duration.............: min=1.52ms avg=2.82ms med=2.13ms p(90)=5.79ms p(95)=6.27ms p(99)=6.99ms  max=7.29ms   
+     ✓ { phase:load }..............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms  max=0.00ms   
+     ✓ { phase:spike }.............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms  max=0.00ms   
+     ✓ { phase:stress }............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms  max=0.00ms   
+   ✗ http_req_failed...............: 100.00% ✓ 32         ✗ 0    
+     http_req_receiving............: min=0.00ms avg=0.03ms med=0.00ms p(90)=0.00ms p(95)=0.24ms p(99)=0.55ms  max=0.56ms   
+     http_req_sending..............: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms  max=0.00ms   
+     http_req_tls_handshaking......: min=0.00ms avg=0.00ms med=0.00ms p(90)=0.00ms p(95)=0.00ms p(99)=0.00ms  max=0.00ms   
+     http_req_waiting..............: min=1.52ms avg=2.79ms med=2.11ms p(90)=5.79ms p(95)=6.27ms p(99)=6.61ms  max=6.73ms   
+     http_reqs.....................: 32      0.686534/s
+   ✓ image_processing_time.........: min=0      avg=0      med=0      p(90)=0      p(95)=0      p(99)=0       max=0        
+   ✓ image_success_rate............: 0.00%   ✓ 0          ✗ 0    
+     iteration_duration............: min=0.00ms avg=9.88ms med=0.54ms p(90)=1.11ms p(95)=1.62ms p(99)=84.57ms max=2955.54ms
+     iterations....................: 7945    170.453482/s
+   ✓ pdf_processing_time...........: min=0      avg=0      med=0      p(90)=0      p(95)=0      p(99)=0       max=0        
+   ✓ pdf_success_rate..............: 0.00%   ✓ 0          ✗ 0    
+   ✓ response_validation_success...: 0.00%   ✓ 0          ✗ 0    
+     vus...........................: 3       min=2        max=4  
+     vus_max.......................: 100     min=100      max=100
